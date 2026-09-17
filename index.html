@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Form by students</title>
+<title>Form</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
 <style>
@@ -100,11 +100,12 @@
 <script>
 const LS_BACKEND = 'ce_backend_url';
 const LS_SESSION = 'ce_session';
-const DEFAULT_BACKEND_URL = 'https://script.google.com/macros/s/AKfycbwLi9fLo-bnCRYXElVsM8CAaup4wvzR69esmTmjiW_ptvN_Cat-7kWmzmxjI_KYTEsavg/exec';
+const DEFAULT_BACKEND_URL = 'https://script.google.com/macros/s/AKfycbzcroqOnQiH3mip4TLIgzrljL-KMFcFrel4zKciM0343rIteY_qUEWdvk-kVIb-U6Xl_w/exec';
 let backendUrl = localStorage.getItem(LS_BACKEND) || DEFAULT_BACKEND_URL;
 let currentUser = null;
 let pendingRole = null;
 let allQuestions = { student: [] };
+const SEMESTER_OPTIONS = ['First Semester', 'Third Semester', 'Fifth Semester'];
 
 function esc(s){ const d=document.createElement('div'); d.textContent = s==null?'':String(s); return d.innerHTML; }
 
@@ -332,6 +333,16 @@ async function renderRoleForm(role){
 
   allQuestions = res.questions || { student:[] };
   const qs = allQuestions[role] || [];
+
+  let currentListsData = {};
+  if(qs.some(q=>q.type==='studentList')){
+    try{
+      const listsRes = await callBackend('getStudentLists', {});
+      currentListsData = (listsRes.ok && listsRes.lists) ? listsRes.lists : {};
+    }catch(e){}
+  }
+  window.formStudentLists = currentListsData;
+
   let fieldsHtml = closeAt ? `<div class="hint" style="margin-top:0;margin-bottom:16px;">Closes: ${esc(new Date(closeAt).toLocaleString())}</div>` : '';
   qs.forEach(q=>{
     fieldsHtml += `<div class="field"><label>${esc(q.label)} ${q.required?'<span class="req">*</span>':''}</label>`;
@@ -341,6 +352,12 @@ async function renderRoleForm(role){
       fieldsHtml += `<textarea id="ans-${q.id}"></textarea>`;
     } else if(q.type==='select'){
       fieldsHtml += `<select id="ans-${q.id}"><option value="">Choose…</option>${opts.map(o=>`<option value="${esc(o)}">${esc(o)}</option>`).join('')}</select>`;
+    } else if(q.type==='semester'){
+      fieldsHtml += `<select id="ans-${q.id}" onchange="onSemesterChange('${q.id}')"><option value="">Choose…</option>${SEMESTER_OPTIONS.map(o=>`<option value="${esc(o)}">${esc(o)}</option>`).join('')}</select>`;
+      errMsg = 'Please select a semester.';
+    } else if(q.type==='studentList'){
+      fieldsHtml += `<select id="ans-${q.id}" data-studentlist="1"><option value="">Choose a semester first…</option></select>`;
+      errMsg = 'Please select your name.';
     } else if(q.type==='time'){
       fieldsHtml += `<input type="time" id="ans-${q.id}">`;
     } else if(q.type==='radio' || q.type==='mcq'){
@@ -371,6 +388,17 @@ async function renderRoleForm(role){
     </div>
   `;
   qs.filter(q=>q.type==='signature').forEach(q=> setupSignaturePad('ans-'+q.id));
+}
+
+function onSemesterChange(semQId){
+  const sem = document.getElementById('ans-'+semQId).value;
+  const names = (window.formStudentLists && window.formStudentLists[sem]) || [];
+  document.querySelectorAll('select[data-studentlist="1"]').forEach(sel=>{
+    const current = sel.value;
+    sel.innerHTML = `<option value="">${sem ? 'Choose…' : 'Choose a semester first…'}</option>` +
+      names.map(n=>`<option value="${esc(n)}">${esc(n)}</option>`).join('');
+    if(names.includes(current)) sel.value = current;
+  });
 }
 
 /* ---------- Signature pad (supports multiple pads per page, keyed by canvas id) ---------- */
@@ -503,6 +531,7 @@ function renderAdmin(){
   document.getElementById('app').innerHTML = `
     <div class="tabs">
       <div class="tab active" id="tab-q-student" onclick="showAdminTab('q-student')">Student questions</div>
+      <div class="tab" id="tab-lists" onclick="showAdminTab('lists')">Student lists</div>
       <div class="tab" id="tab-users" onclick="showAdminTab('users')">Enrolled users</div>
       <div class="tab" id="tab-resp" onclick="showAdminTab('resp')">Responses</div>
       <div class="tab" id="tab-settings" onclick="showAdminTab('settings')">Settings</div>
@@ -513,7 +542,7 @@ function renderAdmin(){
 }
 
 async function showAdminTab(t){
-  ['q-student','users','resp','settings'].forEach(id=>{
+  ['q-student','lists','users','resp','settings'].forEach(id=>{
     document.getElementById('tab-'+id).classList.toggle('active', id===t);
   });
   const view = document.getElementById('admin-view');
@@ -522,6 +551,7 @@ async function showAdminTab(t){
     try{ const res = await callBackend('getQuestions', {}); allQuestions = res.questions; }catch(e){}
     renderQuestionEditor('student');
   }
+  else if(t==='lists') renderStudentLists();
   else if(t==='users') renderUsers();
   else if(t==='resp') renderResponses();
   else if(t==='settings') renderSettings();
@@ -583,6 +613,96 @@ function filterUsers(){
 
 let editingQuestionId = null;
 
+/* ---------- STUDENT LISTS (bulk roster upload, per semester) ---------- */
+let studentListsCache = {};
+
+async function renderStudentLists(){
+  const view = document.getElementById('admin-view');
+  try{
+    const res = await callBackend('getStudentLists', {});
+    studentListsCache = (res.ok && res.lists) ? res.lists : {};
+  }catch(e){ studentListsCache = {}; }
+
+  view.innerHTML = `
+    <div class="card">
+      <div class="hint" style="margin-top:0;">Upload each semester's roster once here. When a student picks a semester on the form, only that semester's names show up in the Student name list — no manual typing needed.</div>
+      ${SEMESTER_OPTIONS.map(sem => renderSemesterListBlock(sem)).join('<hr style="border-color:var(--border);margin:20px 0;">')}
+    </div>
+  `;
+}
+
+function renderSemesterListBlock(sem){
+  const id = sem.replace(/\s+/g,'-');
+  const names = studentListsCache[sem] || [];
+  return `
+    <div class="field">
+      <label>${esc(sem)} <span class="meta" style="font-weight:600;color:var(--muted);">(${names.length} student${names.length===1?'':'s'} saved)</span></label>
+      <input type="file" id="list-file-${id}" accept=".csv,.tsv,.txt" onchange="handleListFile('${sem}', this)" style="margin-bottom:8px;">
+      <textarea id="list-text-${id}" placeholder="Paste one name per line — e.g. copy a single column of names straight from Google Sheets and paste here." style="min-height:120px;font-family:'IBM Plex Mono',monospace;" oninput="previewList('${sem}')">${esc(names.join('\n'))}</textarea>
+      <div class="hint" id="list-preview-${id}" style="margin-top:6px;"></div>
+      <div style="display:flex;gap:10px;margin-top:8px;">
+        <button class="btn-ghost" onclick="saveStudentList('${sem}')">Save list</button>
+        <button class="btn-ghost btn-danger" onclick="clearStudentList('${sem}')">Clear list</button>
+      </div>
+      <div class="status" id="list-status-${id}"></div>
+    </div>
+  `;
+}
+
+function handleListFile(sem, input){
+  const file = input.files && input.files[0];
+  if(!file) return;
+  const reader = new FileReader();
+  reader.onload = () => {
+    const id = sem.replace(/\s+/g,'-');
+    document.getElementById('list-text-'+id).value = reader.result;
+    previewList(sem);
+  };
+  reader.readAsText(file);
+}
+
+function parseListNames(raw){
+  return raw.split(/\r?\n/)
+    .map(l => l.split(',')[0].split('\t')[0].trim()) // tolerate a stray comma/tab-separated first column too
+    .filter(name => name.length > 0 && !/^name$/i.test(name)); // drop blanks and a lone "Name" header
+}
+
+function previewList(sem){
+  const id = sem.replace(/\s+/g,'-');
+  const raw = document.getElementById('list-text-'+id).value;
+  const names = parseListNames(raw);
+  document.getElementById('list-preview-'+id).textContent = names.length + ' name' + (names.length===1?'':'s') + ' ready to save.';
+}
+
+async function saveStudentList(sem){
+  const id = sem.replace(/\s+/g,'-');
+  const raw = document.getElementById('list-text-'+id).value;
+  const names = parseListNames(raw);
+  const status = document.getElementById('list-status-'+id);
+  status.innerHTML = '<span class="spinner"></span>Saving…';
+  try{
+    const res = await callBackend('saveStudentList', { semester: sem, names });
+    if(!res.ok) throw new Error(res.error);
+    status.textContent = 'Saved ' + names.length + ' names.';
+    studentListsCache[sem] = names;
+  }catch(e){ status.textContent = 'Could not save. Try again.'; }
+}
+
+async function clearStudentList(sem){
+  const id = sem.replace(/\s+/g,'-');
+  if(!confirm('Clear the saved list for '+sem+'? This does not affect past responses.')) return;
+  const status = document.getElementById('list-status-'+id);
+  status.innerHTML = '<span class="spinner"></span>Clearing…';
+  try{
+    const res = await callBackend('saveStudentList', { semester: sem, names: [] });
+    if(!res.ok) throw new Error(res.error);
+    document.getElementById('list-text-'+id).value = '';
+    previewList(sem);
+    status.textContent = 'Cleared.';
+    studentListsCache[sem] = [];
+  }catch(e){ status.textContent = 'Could not clear. Try again.'; }
+}
+
 function renderQuestionEditor(role){
   editingQuestionId = null;
   const qs = allQuestions[role] || [];
@@ -624,6 +744,8 @@ function renderQuestionEditor(role){
             <option value="checkbox">Checkbox</option>
             <option value="decision">Decision box (Yes/No)</option>
             <option value="signature">Signature</option>
+            <option value="semester">Semester (First/Third/Fifth)</option>
+            <option value="studentList">Student name (from semester list)</option>
           </select>
         </div>
         <div class="field">
@@ -636,6 +758,7 @@ function renderQuestionEditor(role){
         <label>Options (comma-separated)</label>
         <input type="text" id="nq-options" placeholder="e.g. First,Second,Third">
       </div>
+      <div class="hint">"Semester" and "Student name (from semester list)" work as a pair: add a Semester question, then a Student name question — when a student picks their semester, the name list narrows to just that semester's roster. Upload rosters under the "Student lists" tab.</div>
       <div style="display:flex;gap:10px;">
         <button class="btn" id="nq-submit-btn" onclick="addQuestion('${role}')">Add question</button>
         <button class="btn-ghost" id="nq-cancel-btn" onclick="cancelEditQuestion('${role}')" style="display:none;width:auto;">Cancel</button>
@@ -727,6 +850,10 @@ async function renderResponses(){
           <option value="">All roles</option>
           <option value="student">Students</option>
         </select>
+        <select id="resp-semester-filter" onchange="filterResponses()">
+          <option value="">All semesters</option>
+          ${SEMESTER_OPTIONS.map(s=>`<option value="${esc(s)}">${esc(s)}</option>`).join('')}
+        </select>
         <select id="resp-form-filter" onchange="filterResponses()">
           <option value="">All forms</option>
           ${formOptions.map(v=>`<option value="${esc(v)}">${esc(formVersionLabel(v))}</option>`).join('')}
@@ -738,7 +865,7 @@ async function renderResponses(){
         <button class="btn-ghost btn-danger" onclick="deleteAllResponses()">Delete all responses</button>
       </div>
       <div class="table-wrap"><table>
-        <thead><tr><th>Time</th><th>Form</th><th>Role</th><th>Name</th><th>Mobile</th><th>Answers</th></tr></thead>
+        <thead><tr><th>Time</th><th>Form</th><th>Role</th><th>Semester</th><th>Name</th><th>Mobile</th><th>Answers</th></tr></thead>
         <tbody id="resp-body"></tbody>
       </table></div>
       <div class="empty" id="resp-empty" style="display:none;"></div>
@@ -747,15 +874,26 @@ async function renderResponses(){
   filterResponses();
 }
 
+// Submissions don't tag which answer was "the semester" — semester-type answers
+// are always one of the fixed SEMESTER_OPTIONS strings, so we detect it by value.
+function getSubmissionSemester(e){
+  const vals = Object.values(e.answers||{});
+  return SEMESTER_OPTIONS.find(s => vals.includes(s)) || '';
+}
+
+let respFiltered = [];
 function filterResponses(){
   const roleF = document.getElementById('resp-role-filter').value;
+  const semF = document.getElementById('resp-semester-filter').value;
   const formF = document.getElementById('resp-form-filter').value;
   const q = document.getElementById('resp-search').value.trim().toLowerCase();
   const rows = respCache.filter(e =>
     (!roleF || e.role===roleF) &&
+    (!semF || getSubmissionSemester(e)===semF) &&
     (!formF || (e.formVersion||'v1')===formF) &&
     (!q || (e.name+e.mobile).toLowerCase().includes(q))
   );
+  respFiltered = rows;
   const body = document.getElementById('resp-body');
   const empty = document.getElementById('resp-empty');
   body.innerHTML = '';
@@ -773,7 +911,7 @@ function filterResponses(){
       return esc(k)+': '+esc(v);
     });
     const ansText = parts.join(' · ');
-    tr.innerHTML = `<td>${esc(new Date(e.time).toLocaleString())}</td><td>${esc(formVersionLabel(e.formVersion))}</td><td>${esc(e.role)}</td><td>${esc(e.name)}</td><td>${esc(e.mobile)}</td><td>${ansText}</td>`;
+    tr.innerHTML = `<td>${esc(new Date(e.time).toLocaleString())}</td><td>${esc(formVersionLabel(e.formVersion))}</td><td>${esc(e.role)}</td><td>${esc(getSubmissionSemester(e) || '—')}</td><td>${esc(e.name)}</td><td>${esc(e.mobile)}</td><td>${ansText}</td>`;
     body.appendChild(tr);
   });
 }
@@ -792,14 +930,15 @@ async function deleteAllResponses(){
 }
 
 function exportCSV(){
-  if(respCache.length===0) return;
+  const data = respFiltered;
+  if(data.length===0) return;
   const keys = new Set();
-  respCache.forEach(e=>Object.keys(e.answers||{}).forEach(k=>keys.add(k)));
+  data.forEach(e=>Object.keys(e.answers||{}).forEach(k=>keys.add(k)));
   const keyList = Array.from(keys);
-  const headers = ['Time','Form','Role','Name','Mobile', ...keyList];
+  const headers = ['Time','Form','Role','Semester','Name','Mobile', ...keyList];
   const lines = [headers.map(h=>'"'+h.replace(/"/g,'""')+'"').join(',')];
-  respCache.forEach(e=>{
-    const row = [e.time, formVersionLabel(e.formVersion), e.role, e.name, e.mobile, ...keyList.map(k=>{
+  data.forEach(e=>{
+    const row = [e.time, formVersionLabel(e.formVersion), e.role, getSubmissionSemester(e), e.name, e.mobile, ...keyList.map(k=>{
       const v = (e.answers||{})[k] || '';
       return (typeof v === 'string' && v.startsWith('data:image')) ? '[signature — see PDF export to view]' : v;
     })];
@@ -813,7 +952,8 @@ function exportCSV(){
 }
 
 function exportPDF(){
-  if(respCache.length===0) return;
+  const data = respFiltered;
+  if(data.length===0) return;
   if(!window.jspdf){ alert('PDF library did not load — check your internet connection and try again.'); return; }
   const { jsPDF } = window.jspdf;
   const doc = new jsPDF({ orientation: 'landscape' });
@@ -827,7 +967,7 @@ function exportPDF(){
 
   // Only include columns that have at least one actual entered answer.
   const keys = new Set();
-  respCache.forEach(e=>Object.keys(e.answers||{}).forEach(k=>{
+  data.forEach(e=>Object.keys(e.answers||{}).forEach(k=>{
     const v = (e.answers||{})[k];
     if(v !== undefined && v !== null && v !== '') keys.add(k);
   }));
@@ -837,13 +977,13 @@ function exportPDF(){
   // image in the PDF instead of dumping raw base64 text or an "[attachment]" label.
   const sigCols = new Set();
   keyList.forEach((k, idx)=>{
-    if(respCache.some(e => typeof (e.answers||{})[k] === 'string' && (e.answers[k]||'').startsWith('data:image'))) sigCols.add(idx);
+    if(data.some(e => typeof (e.answers||{})[k] === 'string' && (e.answers[k]||'').startsWith('data:image'))) sigCols.add(idx);
   });
 
-  const fixedCols = 5;
-  const headers = ['Time','Form','Role','Name','Mobile', ...keyList];
-  const rows = respCache.map(e => [
-    new Date(e.time).toLocaleString(), formVersionLabel(e.formVersion), e.role, e.name, e.mobile,
+  const fixedCols = 6;
+  const headers = ['Time','Form','Role','Semester','Name','Mobile', ...keyList];
+  const rows = data.map(e => [
+    new Date(e.time).toLocaleString(), formVersionLabel(e.formVersion), e.role, getSubmissionSemester(e), e.name, e.mobile,
     ...keyList.map((k, idx)=>{
       const v = (e.answers||{})[k];
       if(v===undefined || v===null || v==='') return '';
@@ -860,12 +1000,12 @@ function exportPDF(){
     headStyles: { fillColor: [99, 102, 241], textColor: 255 },
     alternateRowStyles: { fillColor: [238, 242, 255] },
     columnStyles: Object.fromEntries(Array.from(sigCols).map(idx => [idx+fixedCols, { minCellHeight: 16, cellWidth: 28 }])),
-    didDrawCell: (data) => {
-      if(data.section !== 'body') return;
-      const colIdx = data.column.index - fixedCols;
+    didDrawCell: (data2) => {
+      if(data2.section !== 'body') return;
+      const colIdx = data2.column.index - fixedCols;
       if(colIdx < 0 || !sigCols.has(colIdx)) return;
       const key = keyList[colIdx];
-      const entry = respCache[data.row.index];
+      const entry = data[data2.row.index];
       const val = entry && entry.answers ? entry.answers[key] : '';
       if(typeof val === 'string' && val.startsWith('data:image')){
         try{
